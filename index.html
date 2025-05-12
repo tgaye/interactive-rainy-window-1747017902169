@@ -1,0 +1,495 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Rainy Window</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a2e;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+        }
+        #canvas-container {
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: center;
+            position: relative;
+        }
+        .window-frame {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+    </style>
+
+<base target="_self">
+
+
+    </head><body><div id="canvas-container">
+        <div class="window-frame" id="window-frame"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.8.0/lib/p5.js"></script>
+    <script>
+        const sketch = function(p) {
+            let canvas;
+            let raindrops = [];
+            let windowDrops = [];
+            let fogParticles = [];
+            let windowTexture;
+            let lastInteractionTime = 0;
+            let interactionActive = false;
+            let windowCondensation = 0;
+            let windowWarp = 0;
+            let windForce = 0;
+            let rainIntensity = 0.5;
+            let frameRateMonitor = 0;
+            let quality = 1;
+            let lastFrameTime = 0;
+            let audioContext, gainNode, oscillator;
+            let isAudioEnabled = false;
+
+            p.setup = function() {
+                canvas = p.createCanvas(p.min(p.windowWidth, 1200), p.min(p.windowHeight, 800));
+                canvas.parent('canvas-container');
+                canvas.mousePressed(handleMousePress);
+                p.colorMode(p.HSB, 360, 100, 100, 1);
+                
+                // Initialize audio context (will be activated on first interaction)
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    gainNode = audioContext.createGain();
+                    gainNode.gain.value = 0;
+                    gainNode.connect(audioContext.destination);
+                    isAudioEnabled = true;
+                } catch (e) {
+                    console.log("Audio not supported");
+                    isAudioEnabled = false;
+                }
+
+                createWindowTexture();
+                initializeFog();
+                
+                // Create initial raindrops
+                for (let i = 0; i < 100 * quality; i++) {
+                    raindrops.push(new Raindrop());
+                }
+            };
+
+            function createWindowTexture() {
+                windowTexture = p.createGraphics(p.width, p.height);
+                windowTexture.noStroke();
+                
+                // Create subtle window imperfections
+                for (let i = 0; i < 20; i++) {
+                    let x = p.random(p.width);
+                    let y = p.random(p.height);
+                    let size = p.random(5, 30);
+                    let opacity = p.random(0.01, 0.05);
+                    
+                    windowTexture.fill(200, 20, 100, opacity);
+                    windowTexture.ellipse(x, y, size, size);
+                }
+                
+                // Add slight warping effect
+                windowTexture.loadPixels();
+                for (let x = 0; x < windowTexture.width; x++) {
+                    for (let y = 0; y < windowTexture.height; y++) {
+                        let index = (x + y * windowTexture.width) * 4;
+                        let warp = p.noise(x * 0.01, y * 0.01) * 2;
+                        windowTexture.pixels[index + 3] *= 1 + warp * 0.1;
+                    }
+                }
+                windowTexture.updatePixels();
+            }
+
+            function initializeFog() {
+                fogParticles = [];
+                for (let i = 0; i < 50 * quality; i++) {
+                    fogParticles.push(new FogParticle());
+                }
+            }
+
+            function handleMousePress() {
+                interactionActive = true;
+                lastInteractionTime = p.millis();
+                
+                // Activate audio on first interaction if supported
+                if (isAudioEnabled && audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+                
+                playInteractionSound(0.5);
+            }
+
+            function playInteractionSound(param) {
+                if (!isAudioEnabled) return;
+                
+                if (!oscillator) {
+                    oscillator = audioContext.createOscillator();
+                    oscillator.type = 'sine';
+                    oscillator.connect(gainNode);
+                    oscillator.start();
+                }
+                
+                oscillator.frequency.setValueAtTime(300 + param * 600, audioContext.currentTime);
+                gainNode.gain.cancelScheduledValues(audioContext.currentTime);
+                gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.5);
+            }
+
+            p.draw = function() {
+                // Monitor frame rate and adjust quality
+                monitorFrameRate();
+                
+                // Update environment based on interaction
+                updateEnvironment();
+                
+                // Draw background
+                drawBackground();
+                
+                // Draw fog layer
+                drawFog();
+                
+                // Update and draw raindrops
+                updateRaindrops();
+                
+                // Update and draw window drops
+                updateWindowDrops();
+                
+                // Draw window texture
+                drawWindowTexture();
+                
+                // Draw window frame
+                drawWindowFrame();
+            };
+
+            function monitorFrameRate() {
+                const now = p.millis();
+                if (lastFrameTime > 0) {
+                    const currentFrameRate = 1000 / (now - lastFrameTime);
+                    frameRateMonitor = p.lerp(frameRateMonitor, currentFrameRate, 0.1);
+                    
+                    // Adjust quality if frame rate drops below 30
+                    if (frameRateMonitor < 30 && quality > 0.5) {
+                        quality = p.max(0.5, quality - 0.1);
+                        adjustQuality();
+                    } else if (frameRateMonitor > 50 && quality < 1) {
+                        quality = p.min(1, quality + 0.1);
+                        adjustQuality();
+                    }
+                }
+                lastFrameTime = now;
+            }
+
+            function adjustQuality() {
+                // Reduce particle count based on quality
+                while (raindrops.length > 100 * quality) {
+                    raindrops.pop();
+                }
+                while (fogParticles.length > 50 * quality) {
+                    fogParticles.pop();
+                }
+            }
+
+            function updateEnvironment() {
+                // Check if interaction is still active
+                if (p.millis() - lastInteractionTime > 3000) {
+                    interactionActive = false;
+                }
+                
+                // Update condensation based on interaction
+                if (interactionActive) {
+                    windowCondensation = p.min(1, windowCondensation + 0.01);
+                } else {
+                    windowCondensation = p.max(0, windowCondensation - 0.002);
+                }
+                
+                // Update window warp based on mouse position
+                if (p.mouseX > 0 && p.mouseX < p.width && p.mouseY > 0 && p.mouseY < p.height) {
+                    const distToCenter = p.dist(p.mouseX, p.mouseY, p.width/2, p.height/2);
+                    windowWarp = p.map(distToCenter, 0, p.width/2, 0.5, 0);
+                }
+                
+                // Update wind force based on mouse X position
+                windForce = p.map(p.mouseX, 0, p.width, -0.5, 0.5);
+                
+                // Update rain intensity based on mouse Y position
+                rainIntensity = p.map(p.mouseY, 0, p.height, 0.2, 0.8);
+                
+                // Add new raindrops based on intensity
+                if (p.frameCount % p.floor(p.map(rainIntensity, 0, 1, 60, 5))) {
+                    raindrops.push(new Raindrop());
+                }
+            }
+
+            function drawBackground() {
+                // Gradient background
+                const topColor = p.color(220, 70, 20);
+                const bottomColor = p.color(220, 80, 40);
+                
+                for (let y = 0; y < p.height; y++) {
+                    const inter = p.map(y, 0, p.height, 0, 1);
+                    const c = p.lerpColor(topColor, bottomColor, inter);
+                    p.stroke(c);
+                    p.line(0, y, p.width, y);
+                }
+                
+                // Add distant city silhouette
+                p.noStroke();
+                p.fill(220, 80, 20);
+                for (let i = 0; i < 20; i++) {
+                    const x = p.random(p.width);
+                    const w = p.random(10, 100);
+                    const h = p.random(20, 150);
+                    p.rect(x, p.height - h, w, h);
+                }
+            }
+
+            function drawFog() {
+                p.blendMode(p.SCREEN);
+                for (let particle of fogParticles) {
+                    particle.update();
+                    particle.display();
+                    
+                    // Recycle particles that go off screen
+                    if (particle.pos.y < -10 || particle.pos.x < -10 || particle.pos.x > p.width + 10) {
+                        const index = fogParticles.indexOf(particle);
+                        fogParticles[index] = new FogParticle();
+                    }
+                }
+                p.blendMode(p.BLEND);
+            }
+
+            function updateRaindrops() {
+                for (let i = raindrops.length - 1; i >= 0; i--) {
+                    const drop = raindrops[i];
+                    drop.update();
+                    drop.display();
+                    
+                    // Check if drop hits the window
+                    if (drop.pos.y > p.height * 0.7 && drop.vel.y > 0) {
+                        if (p.random() < 0.3 * rainIntensity) {
+                            windowDrops.push(new WindowDrop(drop.pos.x, drop.pos.y, drop.size));
+                            playInteractionSound(drop.size / 20);
+                        }
+                        raindrops.splice(i, 1);
+                    }
+                }
+            }
+
+            function updateWindowDrops() {
+                for (let i = windowDrops.length - 1; i >= 0; i--) {
+                    const drop = windowDrops[i];
+                    drop.update();
+                    drop.display();
+                    
+                    // Remove drops that have faded or moved off screen
+                    if (drop.alpha <= 0 || drop.pos.y > p.height + 10) {
+                        windowDrops.splice(i, 1);
+                    }
+                }
+            }
+
+            function drawWindowTexture() {
+                p.push();
+                p.tint(255, 150 + windowCondensation * 100);
+                p.image(windowTexture, 0, 0);
+                p.pop();
+            }
+
+            function drawWindowFrame() {
+                p.push();
+                p.noFill();
+                p.stroke(50, 30, 80, 0.8);
+                p.strokeWeight(10);
+                p.rect(0, 0, p.width, p.height);
+                
+                // Add window dividers
+                const dividerCount = 3;
+                for (let i = 1; i < dividerCount; i++) {
+                    const x = p.width / dividerCount * i;
+                    p.line(x, 0, x, p.height);
+                }
+                p.pop();
+            }
+
+            class Raindrop {
+                constructor() {
+                    this.reset();
+                    this.size = p.random(2, 5);
+                    this.speed = p.random(2, 5) * rainIntensity;
+                }
+                
+                reset() {
+                    this.pos = p.createVector(
+                        p.random(-50, p.width + 50),
+                        p.random(-200, -10)
+                    );
+                    this.vel = p.createVector(
+                        windForce * p.random(0.5, 1.5),
+                        this.speed * p.random(0.8, 1.2)
+                    );
+                }
+                
+                update() {
+                    this.pos.add(this.vel);
+                    this.vel.x = p.lerp(this.vel.x, windForce, 0.01);
+                    
+                    // Reset if off screen
+                    if (this.pos.x < -100 || this.pos.x > p.width + 100 || this.pos.y > p.height + 100) {
+                        this.reset();
+                    }
+                }
+                
+                display() {
+                    p.push();
+                    p.stroke(200, 80, 90, 0.8);
+                    p.strokeWeight(this.size);
+                    p.line(
+                        this.pos.x - this.vel.x * 2,
+                        this.pos.y - this.vel.y * 2,
+                        this.pos.x,
+                        this.pos.y
+                    );
+                    p.pop();
+                }
+            }
+
+            class WindowDrop {
+                constructor(x, y, size) {
+                    this.pos = p.createVector(x, y);
+                    this.size = size * p.random(0.8, 1.2);
+                    this.vel = p.createVector(
+                        (p.random(-0.5, 0.5) + windForce) * 0.5,
+                        p.random(0.1, 0.5)
+                    );
+                    this.alpha = 1;
+                    this.life = p.random(100, 200);
+                    this.maxSize = this.size;
+                }
+                
+                update() {
+                    this.pos.add(this.vel);
+                    this.vel.x = p.lerp(this.vel.x, windForce * 0.3, 0.05);
+                    this.vel.y += 0.02;
+                    
+                    // Apply window warp effect
+                    if (windowWarp > 0) {
+                        const warpX = p.noise(this.pos.x * 0.01, this.pos.y * 0.01) * 2 - 1;
+                        this.vel.x += warpX * windowWarp * 0.1;
+                    }
+                    
+                    // Fade out over time
+                    this.alpha -= 1 / this.life;
+                    this.size = this.maxSize * p.min(1, this.alpha * 2);
+                    
+                    // Merge with other drops
+                    for (let other of windowDrops) {
+                        if (other !== this && p.dist(this.pos.x, this.pos.y, other.pos.x, other.pos.y) < this.size) {
+                            this.vel.add(p5.Vector.sub(other.pos, this.pos).mult(0.01));
+                            this.size = p.lerp(this.size, other.size, 0.1);
+                        }
+                    }
+                }
+                
+                display() {
+                    p.push();
+                    p.noStroke();
+                    p.fill(200, 50, 100, this.alpha * 0.8);
+                    p.ellipse(this.pos.x, this.pos.y, this.size, this.size * 0.8);
+                    
+                    // Add highlight
+                    p.fill(200, 20, 100, this.alpha * 0.5);
+                    p.ellipse(
+                        this.pos.x - this.size * 0.2,
+                        this.pos.y - this.size * 0.2,
+                        this.size * 0.4,
+                        this.size * 0.3
+                    );
+                    p.pop();
+                }
+            }
+
+            class FogParticle {
+                constructor() {
+                    this.reset();
+                    this.size = p.random(10, 50);
+                    this.alpha = p.random(0.01, 0.05);
+                }
+                
+                reset() {
+                    this.pos = p.createVector(
+                        p.random(p.width),
+                        p.random(p.height * 0.7, p.height)
+                    );
+                    this.vel = p.createVector(
+                        p.random(-0.2, 0.2),
+                        p.random(-0.5, -0.1)
+                    );
+                }
+                
+                update() {
+                    this.pos.add(this.vel);
+                    this.vel.x = p.lerp(this.vel.x, windForce * 0.2, 0.01);
+                }
+                
+                display() {
+                    p.push();
+                    p.noStroke();
+                    p.fill(220, 10, 100, this.alpha);
+                    p.ellipse(this.pos.x, this.pos.y, this.size, this.size);
+                    p.pop();
+                }
+            }
+
+            p.windowResized = function() {
+                p.resizeCanvas(p.min(p.windowWidth, 1200), p.min(p.windowHeight, 800));
+                createWindowTexture();
+                initializeFog();
+            };
+
+            p.mouseMoved = function() {
+                lastInteractionTime = p.millis();
+                interactionActive = true;
+                
+                // Create condensation trails when mouse moves
+                if (p.mouseX > 0 && p.mouseX < p.width && p.mouseY > 0 && p.mouseY < p.height) {
+                    if (p.frameCount % 3 === 0) {
+                        windowDrops.push(new WindowDrop(p.mouseX, p.mouseY, p.random(5, 15)));
+                    }
+                }
+            };
+
+            p.mouseDragged = function() {
+                // Draw with finger/mouse
+                for (let i = 0; i < 3; i++) {
+                    windowDrops.push(new WindowDrop(
+                        p.mouseX + p.random(-10, 10),
+                        p.mouseY + p.random(-10, 10),
+                        p.random(5, 20)
+                    ));
+                }
+                playInteractionSound(p.map(p.mouseY, 0, p.height, 0, 1));
+            };
+        };
+
+        new p5(sketch);
+    </script>
+
+              
+          
+                
+          
+              
+</body></html>
